@@ -219,6 +219,25 @@ static inline bool access_error(unsigned int fsr, struct vm_area_struct *vma)
 	return vma->vm_flags & mask ? false : true;
 }
 
+static void aw_vma_pid_add(struct vm_area_struct *vma, pid_t pid)
+{
+	int i;
+
+	if (vma->access_vma_num > 62)
+		return;
+	if (vma->access_vma_num == 0) {
+		vma->access_vma_array[0] = pid;
+		vma->access_vma_num++;
+		return;
+	}
+	for (i = 0; i < vma->access_vma_num; i++) {
+		if (pid == vma->access_vma_array[i])
+			return;
+	}
+	vma->access_vma_array[vma->access_vma_num] = pid;
+	vma->access_vma_num++;
+}
+
 static int __kprobes
 __do_page_fault(struct mm_struct *mm, unsigned long addr, unsigned int fsr,
 		unsigned int flags, struct task_struct *tsk)
@@ -243,6 +262,7 @@ good_area:
 		goto out;
 	}
 
+	aw_vma_pid_add(vma, current->pid);
 	return handle_mm_fault(vma, addr & PAGE_MASK, flags);
 
 check_stack:

@@ -57,6 +57,7 @@ struct fib_nh_exception {
 	int				fnhe_genid;
 	__be32				fnhe_daddr;
 	u32				fnhe_pmtu;
+	bool				fnhe_mtu_locked;
 	__be32				fnhe_gw;
 	unsigned long			fnhe_expires;
 	struct rtable __rcu		*fnhe_rth_input;
@@ -69,7 +70,11 @@ struct fnhe_hash_bucket {
 	struct fib_nh_exception __rcu	*chain;
 };
 
+#if CONFIG_BASE_SMALL > 0
 #define FNHE_HASH_SHIFT		11
+#else
+#define FNHE_HASH_SHIFT		4
+#endif
 #define FNHE_HASH_SIZE		(1 << FNHE_HASH_SHIFT)
 #define FNHE_RECLAIM_DEPTH	5
 
@@ -170,6 +175,7 @@ struct fib_result_nl {
 #ifdef CONFIG_IP_MULTIPLE_TABLES
 #define FIB_TABLE_HASHSZ 256
 #else
+/* Can we use 1 for BASE_SMALL? */
 #define FIB_TABLE_HASHSZ 2
 #endif
 

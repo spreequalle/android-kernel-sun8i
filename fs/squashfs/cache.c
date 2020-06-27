@@ -191,6 +191,17 @@ void squashfs_cache_put(struct squashfs_cache_entry *entry)
 	entry->refcount--;
 	if (entry->refcount == 0) {
 		cache->unused++;
+
+		/*
+		 * If error of this entry is occured, we need to
+		 * mark it to SQUASHFS_INVALID_BLK, and clear the
+		 * error variable.
+		 */
+		if (entry->error) {
+			entry->error = 0;
+			entry->block = SQUASHFS_INVALID_BLK;
+		}
+
 		/*
 		 * If there's any processes waiting for a block to become
 		 * available, wake one up.
@@ -349,6 +360,9 @@ int squashfs_read_metadata(struct super_block *sb, void *buffer,
 	struct squashfs_cache_entry *entry;
 
 	TRACE("Entered squashfs_read_metadata [%llx:%x]\n", *block, *offset);
+
+	if (unlikely(length < 0))
+		return -EIO;
 
 	while (length) {
 		entry = squashfs_cache_get(sb, msblk->block_cache, *block, 0);

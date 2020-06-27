@@ -365,6 +365,12 @@ struct vm_area_struct {
 	struct mempolicy *vm_policy;	/* NUMA policy for the VMA */
 #endif
 	struct vm_userfaultfd_ctx vm_userfaultfd_ctx;
+
+	pid_t aw_alloc_pid;
+	char *aw_alloc_comm;
+
+	int access_vma_array[64];
+	int access_vma_num;
 };
 
 struct core_thread {

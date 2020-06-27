@@ -576,6 +576,7 @@ config NFT_COMPAT
 	  framework.
 
 config NFT_HASH
+	select RHASHTABLE
 	tristate "Netfilter nf_tables hash module"
 	help
 	  This option adds the "hash" expression that you can use to perform

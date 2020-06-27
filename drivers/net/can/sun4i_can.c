@@ -205,6 +205,9 @@ struct sun4ican_priv {
 	void __iomem *base;
 	struct clk *clk;
 	spinlock_t cmdreg_lock;	/* lock for concurrent cmd register writes */
+	bool is_suspend;
+	struct pinctrl *can_pinctrl;
+	spinlock_t lock;
 };
 
 static const struct can_bittiming_const sun4ican_bittiming_const = {
@@ -342,7 +345,7 @@ static int sun4i_can_start(struct net_device *dev)
 
 	/* enter the selected mode */
 	mod_reg_val = readl(priv->base + SUN4I_REG_MSEL_ADDR);
-	if (priv->can.ctrlmode & CAN_CTRLMODE_PRESUME_ACK)
+	if (priv->can.ctrlmode & CAN_CTRLMODE_LOOPBACK)
 		mod_reg_val |= SUN4I_MSEL_LOOPBACK_MODE;
 	else if (priv->can.ctrlmode & CAN_CTRLMODE_LISTENONLY)
 		mod_reg_val |= SUN4I_MSEL_LISTEN_ONLY_MODE;
@@ -539,6 +542,13 @@ static int sun4i_can_err(struct net_device *dev, u8 isrc, u8 status)
 		}
 		stats->rx_over_errors++;
 		stats->rx_errors++;
+
+		/* reset the CAN IP by entering reset mode
+		 * ignoring timeout error
+		 */
+		set_reset_mode(dev);
+		set_normal_mode(dev);
+
 		/* clear bit */
 		sun4i_can_write_cmdreg(priv, SUN4I_CMD_CLEAR_OR_FLAG);
 	}
@@ -653,8 +663,9 @@ static irqreturn_t sun4i_can_interrupt(int irq, void *dev_id)
 			netif_wake_queue(dev);
 			can_led_event(dev, CAN_LED_EVENT_TX);
 		}
-		if (isrc & SUN4I_INT_RBUF_VLD) {
-			/* receive interrupt */
+		if ((isrc & SUN4I_INT_RBUF_VLD) &&
+		    !(isrc & SUN4I_INT_DATA_OR)) {
+			/* receive interrupt - don't read if overrun occurred */
 			while (status & SUN4I_STA_RBUF_RDY) {
 				/* RX buffer is not empty */
 				sun4i_can_rx(dev);
@@ -745,15 +756,55 @@ static const struct net_device_ops sun4ican_netdev_ops = {
 
 static const struct of_device_id sun4ican_of_match[] = {
 	{.compatible = "allwinner,sun4i-a10-can"},
+	{.compatible = "allwinner,sunxi-can"},
 	{},
 };
 
 MODULE_DEVICE_TABLE(of, sun4ican_of_match);
 
+static int can_request_gpio(struct platform_device *pdev)
+{
+	struct net_device *dev = platform_get_drvdata(pdev);
+	struct sun4ican_priv *priv = netdev_priv(dev);
+	struct pinctrl_state *pctrl_state = NULL;
+	int ret = 0;
+
+	priv->can_pinctrl = devm_pinctrl_get(&pdev->dev);
+	if (IS_ERR_OR_NULL(priv->can_pinctrl)) {
+		netdev_err(dev, "request pinctrl handle fail!\n");
+		return -EINVAL;
+	}
+
+	pctrl_state = pinctrl_lookup_state(priv->can_pinctrl,
+			PINCTRL_STATE_DEFAULT);
+	if (IS_ERR(pctrl_state)) {
+		netdev_err(dev, "pinctrl_lookup_state fail! return %p\n",
+				pctrl_state);
+		return -EINVAL;
+	}
+
+	ret = pinctrl_select_state(priv->can_pinctrl, pctrl_state);
+	if (ret < 0)
+		netdev_err(dev, "pinctrl_select_state fail! return %d\n", ret);
+
+	return ret;
+}
+
+static void can_release_gpio(struct platform_device *pdev)
+{
+	struct net_device *dev = platform_get_drvdata(pdev);
+	struct sun4ican_priv *priv = netdev_priv(dev);
+
+	if (!IS_ERR_OR_NULL(priv->can_pinctrl))
+		devm_pinctrl_put(priv->can_pinctrl);
+	priv->can_pinctrl = NULL;
+}
+
 static int sun4ican_remove(struct platform_device *pdev)
 {
 	struct net_device *dev = platform_get_drvdata(pdev);
 
+	can_release_gpio(pdev);
 	unregister_netdev(dev);
 	free_candev(dev);
 
@@ -811,14 +862,16 @@ static int sun4ican_probe(struct platform_device *pdev)
 	priv->can.ctrlmode_supported = CAN_CTRLMODE_BERR_REPORTING |
 				       CAN_CTRLMODE_LISTENONLY |
 				       CAN_CTRLMODE_LOOPBACK |
-				       CAN_CTRLMODE_PRESUME_ACK |
 				       CAN_CTRLMODE_3_SAMPLES;
 	priv->base = addr;
 	priv->clk = clk;
 	spin_lock_init(&priv->cmdreg_lock);
+	spin_lock_init(&priv->lock);
 
 	platform_set_drvdata(pdev, dev);
 	SET_NETDEV_DEV(dev, &pdev->dev);
+
+	can_request_gpio(pdev);
 
 	err = register_candev(dev);
 	if (err) {
@@ -839,9 +892,73 @@ exit:
 	return err;
 }
 
+#ifdef CONFIG_PM
+static int can_select_gpio_state(struct pinctrl *pctrl, char *state)
+{
+	int ret = 0;
+	struct pinctrl_state *pctrl_state = NULL;
+
+	pctrl_state = pinctrl_lookup_state(pctrl, state);
+	if (IS_ERR(pctrl_state)) {
+		pr_err("can pinctrl_lookup_state(%s) failed!\n", state);
+		return -1;
+	}
+
+	ret = pinctrl_select_state(pctrl, pctrl_state);
+	if (ret < 0)
+		pr_err("can pinctrl_select_state(%s) failed!\n", state);
+
+	return ret;
+}
+
+static int can_suspend(struct device *dev)
+{
+	struct net_device *ndev = dev_get_drvdata(dev);
+	struct sun4ican_priv *priv = netdev_priv(ndev);
+
+	if (!ndev || !netif_running(ndev))
+		return 0;
+
+	spin_lock(&priv->lock);
+	priv->is_suspend = true;
+	spin_unlock(&priv->lock);
+
+	can_select_gpio_state(priv->can_pinctrl, PINCTRL_STATE_SLEEP);
+	sun4ican_close(ndev);
+
+	return 0;
+}
+
+static int can_resume(struct device *dev)
+{
+	struct net_device *ndev = dev_get_drvdata(dev);
+	struct sun4ican_priv *priv = netdev_priv(ndev);
+
+	if (!ndev || !netif_running(ndev))
+		return 0;
+
+	spin_lock(&priv->lock);
+	priv->is_suspend = false;
+	spin_unlock(&priv->lock);
+
+	can_select_gpio_state(priv->can_pinctrl, PINCTRL_STATE_DEFAULT);
+	sun4ican_open(ndev);
+
+	return 0;
+}
+
+static const struct dev_pm_ops can_pm_ops = {
+	.suspend = can_suspend,
+	.resume = can_resume,
+};
+#else
+static const struct dev_pm_ops can_pm_ops;
+#endif /* CONFIG_PM */
+
 static struct platform_driver sun4i_can_driver = {
 	.driver = {
 		.name = DRV_NAME,
+		.pm = &can_pm_ops,
 		.of_match_table = sun4ican_of_match,
 	},
 	.probe = sun4ican_probe,

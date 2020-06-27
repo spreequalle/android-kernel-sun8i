@@ -82,9 +82,9 @@ struct interactive_tunables {
 	int nabove_hispeed_delay;
 
 	/* Non-zero means indefinite speed boost active */
-	int boost;
+	unsigned int boost;
 	/* Duration of a boot pulse in usecs */
-	int boostpulse_duration;
+	unsigned int boostpulse_duration;
 	/* End time of boost pulse in ktime converted to usecs */
 	u64 boostpulse_endtime;
 	bool boosted;
@@ -1103,7 +1103,6 @@ static void icpu_cancel_work(struct interactive_cpu *icpu)
 {
 	irq_work_sync(&icpu->irq_work);
 	icpu->work_in_progress = false;
-	del_timer_sync(&icpu->slack_timer);
 }
 
 static struct interactive_policy *
@@ -1279,9 +1278,8 @@ int cpufreq_interactive_start(struct cpufreq_policy *policy)
 
 		down_write(&icpu->enable_sem);
 		icpu->ipolicy = ipolicy;
-		up_write(&icpu->enable_sem);
-
 		slack_timer_resched(icpu, cpu, false);
+		up_write(&icpu->enable_sem);
 	}
 
 	gov_set_update_util(ipolicy);
@@ -1302,6 +1300,7 @@ void cpufreq_interactive_stop(struct cpufreq_policy *policy)
 		icpu_cancel_work(icpu);
 
 		down_write(&icpu->enable_sem);
+		del_timer_sync(&icpu->slack_timer);
 		icpu->ipolicy = NULL;
 		up_write(&icpu->enable_sem);
 	}

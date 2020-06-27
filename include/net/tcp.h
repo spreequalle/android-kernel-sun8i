@@ -364,6 +364,7 @@ ssize_t tcp_splice_read(struct socket *sk, loff_t *ppos,
 			struct pipe_inode_info *pipe, size_t len,
 			unsigned int flags);
 
+void tcp_enter_quickack_mode(struct sock *sk, unsigned int max_quickacks);
 static inline void tcp_dec_quickack_mode(struct sock *sk,
 					 const unsigned int pkts)
 {
@@ -401,6 +402,8 @@ int tcp_child_process(struct sock *parent, struct sock *child,
 		      struct sk_buff *skb);
 void tcp_enter_loss(struct sock *sk);
 void tcp_clear_retrans(struct tcp_sock *tp);
+
+#ifdef CONFIG_TCP_METRICS
 void tcp_update_metrics(struct sock *sk);
 void tcp_init_metrics(struct sock *sk);
 void tcp_metrics_init(void);
@@ -409,6 +412,38 @@ bool tcp_peer_is_proven(struct request_sock *req, struct dst_entry *dst,
 bool tcp_remember_stamp(struct sock *sk);
 bool tcp_tw_remember_stamp(struct inet_timewait_sock *tw);
 void tcp_fetch_timewait_stamp(struct sock *sk, struct dst_entry *dst);
+void tcp_fastopen_cache_set(struct sock *sk, u16 mss,
+			    struct tcp_fastopen_cookie *cookie, bool syn_lost,
+			    u16 try_exp);
+/* From tcp_fastopen.c */
+void tcp_fastopen_cache_get(struct sock *sk, u16 *mss,
+			struct tcp_fastopen_cookie *cookie, int *syn_loss,
+			unsigned long *last_syn_loss);
+#else
+
+static inline void tcp_update_metrics(struct sock *sk) {}
+static inline void tcp_init_metrics(struct sock *sk) {}
+static inline void tcp_metrics_init(void) {}
+static inline bool tcp_peer_is_proven(struct request_sock *req,
+				      struct dst_entry *dst,
+				      bool paws_check,
+				      bool timestamps) { return false; }
+static inline bool tcp_remember_stamp(struct sock *sk) { return false; }
+static inline bool
+tcp_tw_remember_stamp(struct inet_timewait_sock *tw) { return false; }
+static inline void
+tcp_fetch_timewait_stamp(struct sock *sk, struct dst_entry *dst) {}
+
+static inline void tcp_fastopen_cache_set(struct sock *sk, u16 mss,
+			    struct tcp_fastopen_cookie *cookie, bool syn_lost,
+			    u16 try_exp) {}
+
+/* From tcp_fastopen.c */
+static inline void tcp_fastopen_cache_get(struct sock *sk, u16 *mss,
+				struct tcp_fastopen_cookie *cookie, int *syn_loss,
+				unsigned long *last_syn_loss) {}
+#endif
+
 void tcp_disable_fack(struct tcp_sock *tp);
 void tcp_close(struct sock *sk, long timeout);
 void tcp_init_sock(struct sock *sk);
@@ -554,6 +589,7 @@ void tcp_send_fin(struct sock *sk);
 void tcp_send_active_reset(struct sock *sk, gfp_t priority);
 int tcp_send_synack(struct sock *);
 void tcp_push_one(struct sock *, unsigned int mss_now);
+void __tcp_send_ack(struct sock *sk, u32 rcv_nxt);
 void tcp_send_ack(struct sock *sk);
 void tcp_send_delayed_ack(struct sock *sk);
 void tcp_send_loss_probe(struct sock *sk);
@@ -1195,7 +1231,7 @@ static inline void tcp_update_wl(struct tcp_sock *tp, u32 seq)
 static inline __sum16 tcp_v4_check(int len, __be32 saddr,
 				   __be32 daddr, __wsum base)
 {
-	return csum_tcpudp_magic(saddr,daddr,len,IPPROTO_TCP,base);
+	return csum_tcpudp_magic(saddr, daddr, len, IPPROTO_TCP, base);
 }
 
 static inline __sum16 __tcp_checksum_complete(struct sk_buff *skb)
@@ -1266,9 +1302,11 @@ void tcp_select_initial_window(int __space, __u32 mss, __u32 *rcv_wnd,
 
 static inline int tcp_win_from_space(int space)
 {
-	return sysctl_tcp_adv_win_scale<=0 ?
-		(space>>(-sysctl_tcp_adv_win_scale)) :
-		space - (space>>sysctl_tcp_adv_win_scale);
+	int tcp_adv_win_scale = sysctl_tcp_adv_win_scale;
+
+	return tcp_adv_win_scale <= 0 ?
+		(space>>(-tcp_adv_win_scale)) :
+		space - (space>>tcp_adv_win_scale);
 }
 
 /* Note: caller must be prepared to deal with negative returns */
@@ -1483,13 +1521,6 @@ int tcp_md5_hash_skb_data(struct tcp_md5sig_pool *, const struct sk_buff *,
 int tcp_md5_hash_key(struct tcp_md5sig_pool *hp,
 		     const struct tcp_md5sig_key *key);
 
-/* From tcp_fastopen.c */
-void tcp_fastopen_cache_get(struct sock *sk, u16 *mss,
-			    struct tcp_fastopen_cookie *cookie, int *syn_loss,
-			    unsigned long *last_syn_loss);
-void tcp_fastopen_cache_set(struct sock *sk, u16 mss,
-			    struct tcp_fastopen_cookie *cookie, bool syn_lost,
-			    u16 try_exp);
 struct tcp_fastopen_request {
 	/* Fast Open cookie. Size 0 means a cookie request */
 	struct tcp_fastopen_cookie	cookie;
@@ -1507,6 +1538,9 @@ struct sock *tcp_try_fastopen(struct sock *sk, struct sk_buff *skb,
 			      struct tcp_fastopen_cookie *foc,
 			      struct dst_entry *dst);
 void tcp_fastopen_init_key_once(bool publish);
+bool tcp_fastopen_cookie_check(struct sock *sk, u16 *mss,
+			     struct tcp_fastopen_cookie *cookie);
+bool tcp_fastopen_defer_connect(struct sock *sk, int *err);
 #define TCP_FASTOPEN_KEY_LENGTH 16
 
 /* Fastopen key context */
@@ -1682,12 +1716,12 @@ static inline void tcp_highest_sack_reset(struct sock *sk)
 	tcp_sk(sk)->highest_sack = tcp_write_queue_head(sk);
 }
 
-/* Called when old skb is about to be deleted (to be combined with new skb) */
-static inline void tcp_highest_sack_combine(struct sock *sk,
+/* Called when old skb is about to be deleted and replaced by new skb */
+static inline void tcp_highest_sack_replace(struct sock *sk,
 					    struct sk_buff *old,
 					    struct sk_buff *new)
 {
-	if (tcp_sk(sk)->sacked_out && (old == tcp_sk(sk)->highest_sack))
+	if (old == tcp_highest_sack(sk))
 		tcp_sk(sk)->highest_sack = new;
 }
 

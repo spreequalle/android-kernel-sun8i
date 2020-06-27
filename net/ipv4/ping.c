@@ -59,8 +59,11 @@ struct ping_table {
 };
 
 static struct ping_table ping_table;
+
+#if IS_ENABLED(CONFIG_IPV6)
 struct pingv6_ops pingv6_ops;
 EXPORT_SYMBOL_GPL(pingv6_ops);
+#endif
 
 static u16 ping_port_rover;
 
@@ -775,8 +778,10 @@ static int ping_v4_sendmsg(struct sock *sk, struct msghdr *msg, size_t len)
 	ipc.addr = faddr = daddr;
 
 	if (ipc.opt && ipc.opt->opt.srr) {
-		if (!daddr)
-			return -EINVAL;
+		if (!daddr) {
+			err = -EINVAL;
+			goto out_free;
+		}
 		faddr = ipc.opt->opt.faddr;
 	}
 	tos = get_rttos(&ipc, inet);
@@ -842,6 +847,7 @@ back_from_confirm:
 
 out:
 	ip_rt_put(rt);
+out_free:
 	if (free)
 		kfree(ipc.opt);
 	if (!err) {
@@ -1214,6 +1220,9 @@ void ping_proc_exit(void)
 {
 	unregister_pernet_subsys(&ping_v4_net_ops);
 }
+
+module_init(ping_proc_init);
+module_exit(ping_proc_exit);
 
 #endif
 

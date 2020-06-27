@@ -7,6 +7,7 @@ menuconfig NET
 	select NLATTR
 	select GENERIC_NET_UTILS
 	select BPF
+	select RHASHTABLE
 	---help---
 	  Unless you really know what you are doing, you should say Y here.
 	  The reason is that some programs need kernel networking support even
@@ -94,6 +95,12 @@ config ANDROID_PARANOID_NETWORK
 	default y
 	help
 		none
+
+config NET_ETHTOOL
+	bool "Ethtool support"
+	default y
+	help
+	  Support changing ethernet driver parameters from user tools.
 
 config NETWORK_SECMARK
 	bool "Security Marking"
@@ -294,6 +301,7 @@ config BPF_JIT
 	bool "enable BPF Just In Time compiler"
 	depends on HAVE_CBPF_JIT || HAVE_EBPF_JIT
 	depends on MODULES
+	depends on !CFI
 	---help---
 	  Berkeley Packet Filter filtering capabilities are normally handled
 	  by an interpreter. This option allows kernel to generate a native

@@ -71,9 +71,6 @@ static ssize_t driver_override_show(struct device *_dev,
 	struct amba_device *dev = to_amba_device(_dev);
 	ssize_t len;
 
-	if (!dev->driver_override)
-		return 0;
-
 	device_lock(_dev);
 	len = sprintf(buf, "%s\n", dev->driver_override);
 	device_unlock(_dev);
@@ -88,7 +85,7 @@ static ssize_t driver_override_store(struct device *_dev,
 	char *driver_override, *old, *cp;
 
 	/* We need to keep extra room for a newline */
-	if (count >= (PAGE_SIZE - 1))
+	if (count > (PAGE_SIZE) - 1)
 		return -EINVAL;
 
 	driver_override = kstrndup(buf, count, GFP_KERNEL);

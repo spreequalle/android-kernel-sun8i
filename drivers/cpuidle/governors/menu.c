@@ -369,7 +369,23 @@ static int menu_select(struct cpuidle_driver *drv, struct cpuidle_device *dev)
 
 		data->last_state_idx = i;
 	}
-
+	/*
+	 * C2 will impact the disp frame irq-op.
+	 *
+	 * because the system would close the vol of cluster.
+	 * when cpuidle-modules get the hw-irq, it will go as follows:
+	 * open vol of cluster -> boot cpu -> irq handler.
+	 * the time used above is more than the time disp-frame demand
+	 * so that it will forbid to enter C2 when disp enabled.
+	 */
+#ifdef CONFIG_DISP2_SUNXI
+	if (data->last_state_idx == 2) {
+		if (disp_is_enable()) {
+			//printk("#### disp_is_enable, can't not in C2!!\n");
+			data->last_state_idx = 1;
+		}
+	}
+#endif
 	return data->last_state_idx;
 }
 

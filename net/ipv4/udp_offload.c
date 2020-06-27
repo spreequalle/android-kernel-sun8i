@@ -122,7 +122,7 @@ static struct sk_buff *__skb_udp_tunnel_segment(struct sk_buff *skb,
 		 * will be using a length value equal to only one MSS sized
 		 * segment instead of the entire frame.
 		 */
-		if (gso_partial) {
+		if (gso_partial && skb_is_gso(skb)) {
 			uh->len = htons(skb_shinfo(skb)->gso_size +
 					SKB_GSO_CB(skb)->data_offset +
 					skb->head - (unsigned char *)uh);
@@ -169,7 +169,13 @@ struct sk_buff *skb_udp_tunnel_segment(struct sk_buff *skb,
 		gso_inner_segment = skb_mac_gso_segment;
 		break;
 	case ENCAP_TYPE_IPPROTO:
+#if IS_ENABLED(CONFIG_INET) && IS_ENABLED(CONFIG_IPV6)
 		offloads = is_ipv6 ? inet6_offloads : inet_offloads;
+#else
+		offloads = is_ipv6 ? NULL : inet_offloads;
+#endif
+		if (!offloads)
+			goto out_unlock;
 		ops = rcu_dereference(offloads[skb->inner_ipproto]);
 		if (!ops || !ops->callbacks.gso_segment)
 			goto out_unlock;
@@ -204,6 +210,9 @@ static struct sk_buff *udp4_ufo_fragment(struct sk_buff *skb,
 		segs = skb_udp_tunnel_segment(skb, features, false);
 		goto out;
 	}
+
+	if (!(skb_shinfo(skb)->gso_type & SKB_GSO_UDP))
+		goto out;
 
 	if (!pskb_may_pull(skb, sizeof(struct udphdr)))
 		goto out;

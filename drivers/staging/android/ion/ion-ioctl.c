@@ -21,6 +21,8 @@
 #include "ion.h"
 #include "ion_priv.h"
 #include "compat_ion.h"
+#include "sunxi/sunxi_ion.h"
+#include <asm/cacheflush.h>
 
 union ion_ioctl_arg {
 	struct ion_fd_data fd;
@@ -83,8 +85,10 @@ long ion_ioctl(struct file *filp, unsigned int cmd, unsigned long arg)
 		return -EFAULT;
 
 	ret = validate_ioctl_arg(cmd, &data);
-	if (WARN_ON_ONCE(ret))
+	if (ret) {
+		pr_warn_once("%s: ioctl validate failed\n", __func__);
 		return ret;
+	}
 
 	if (!(dir & _IOC_WRITE))
 		memset(&data, 0, sizeof(data));
@@ -126,15 +130,11 @@ long ion_ioctl(struct file *filp, unsigned int cmd, unsigned long arg)
 	{
 		struct ion_handle *handle;
 
-		mutex_lock(&client->lock);
-		handle = ion_handle_get_by_id_nolock(client, data.handle.handle);
-		if (IS_ERR(handle)) {
-			mutex_unlock(&client->lock);
+		handle = ion_handle_get_by_id(client, data.handle.handle);
+		if (IS_ERR(handle))
 			return PTR_ERR(handle);
-		}
-		data.fd.fd = ion_share_dma_buf_fd_nolock(client, handle);
-		ion_handle_put_nolock(handle);
-		mutex_unlock(&client->lock);
+		data.fd.fd = ion_share_dma_buf_fd(client, handle);
+		ion_handle_put(handle);
 		if (data.fd.fd < 0)
 			ret = data.fd.fd;
 		break;
@@ -153,6 +153,32 @@ long ion_ioctl(struct file *filp, unsigned int cmd, unsigned long arg)
 	case ION_IOC_SYNC:
 	{
 		ret = ion_sync_for_device(client, data.fd.fd);
+		break;
+	}
+	case ION_IOC_SUNXI_FLUSH_RANGE:
+	{
+		struct sunxi_cache_range data;
+
+		if (copy_from_user(&data, (void __user *)arg,
+				sizeof(struct sunxi_cache_range)))
+			return -EFAULT;
+
+		if (IS_ERR((void *)data.start) || IS_ERR((void *)data.end)) {
+			pr_err("flush 0x%x, end 0x%x fault user virt address!\n",
+			       (u32)data.start, (u32)data.end);
+			return -EFAULT;
+		}
+
+		pr_debug("ion flush_range start:%lx end:%lx size:%lx\n",
+				 data.start, data.end, data.end - data.start);
+#ifdef CONFIG_ARM64
+		__dma_flush_range((void *)data.start, data.end - data.start);
+#else
+		dmac_flush_range((void *)data.start, (void *)data.end);
+#endif
+
+		if (copy_to_user((void __user *)arg, &data, sizeof(data)))
+			return -EFAULT;
 		break;
 	}
 	case ION_IOC_CUSTOM:
